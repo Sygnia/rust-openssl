@@ -1,7 +1,7 @@
 //! Bindings to OpenSSL
 //!
 //! This crate provides a safe interface to the popular OpenSSL cryptography library. OpenSSL versions 1.0.1 through
-//! 1.1.1 and LibreSSL versions 2.5 through 2.8 are supported.
+//! 3.x.x and LibreSSL versions 2.5 through 3.7.x are supported.
 //!
 //! # Building
 //!
@@ -11,7 +11,7 @@
 //! ## Vendored
 //!
 //! If the `vendored` Cargo feature is enabled, the `openssl-src` crate will be used to compile and statically link to
-//! a copy of OpenSSL. The build process requires a C compiler, perl, and make. The OpenSSL version will generally track
+//! a copy of OpenSSL. The build process requires a C compiler, perl (and perl-core), and make. The OpenSSL version will generally track
 //! the newest OpenSSL release, and changes to the version are *not* considered breaking changes.
 //!
 //! ```toml
@@ -28,8 +28,14 @@
 //! Additionally, it will use `pkg-config` on Unix-like systems to find the system installation.
 //!
 //! ```not_rust
-//! # macOS
-//! $ brew install openssl@1.1
+//! # macOS (Homebrew)
+//! $ brew install openssl@3
+//!
+//! # macOS (MacPorts)
+//! $ sudo port install openssl
+//!
+//! # macOS (pkgsrc)
+//! $ sudo pkgin install openssl
 //!
 //! # Arch Linux
 //! $ sudo pacman -S pkg-config openssl
@@ -39,6 +45,9 @@
 //!
 //! # Fedora
 //! $ sudo dnf install pkg-config openssl-devel
+//!
+//! # Alpine Linux
+//! $ apk add pkgconfig openssl-dev
 //! ```
 //!
 //! ## Manual
@@ -53,6 +62,7 @@
 //! * `OPENSSL_STATIC` - If set, the crate will statically link to OpenSSL rather than dynamically link.
 //! * `OPENSSL_LIBS` - If set, a `:`-separated list of library names to link to (e.g. `ssl:crypto`). This can be used
 //!     if nonstandard library names were used for whatever reason.
+//! * `OPENSSL_NO_VENDOR` - If set, always find OpenSSL in the system, even if the `vendored` feature is enabled.
 //!
 //! Additionally, these variables can be prefixed with the upper-cased target architecture (e.g.
 //!     `X86_64_UNKNOWN_LINUX_GNU_OPENSSL_DIR`), which can be useful when cross compiling.
@@ -108,29 +118,15 @@
 //! ctx.set_ciphersuites("TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256").unwrap();
 //! ```
 #![doc(html_root_url = "https://docs.rs/openssl/0.10")]
-
-#[macro_use]
-extern crate bitflags;
-#[macro_use]
-extern crate cfg_if;
-#[macro_use]
-extern crate foreign_types;
-#[macro_use]
-extern crate lazy_static;
-extern crate libc;
-extern crate openssl_sys as ffi;
-
-#[cfg(test)]
-extern crate hex;
-#[cfg(test)]
-extern crate tempdir;
+#![warn(rust_2018_idioms)]
+#![allow(clippy::uninlined_format_args)]
 
 #[doc(inline)]
 pub use ffi::init;
 
 use libc::c_int;
 
-use error::ErrorStack;
+use crate::error::ErrorStack;
 
 #[macro_use]
 mod macros;
@@ -142,7 +138,9 @@ pub mod aes;
 pub mod asn1;
 pub mod base64;
 pub mod bn;
-#[cfg(not(libressl))]
+pub mod cipher;
+pub mod cipher_ctx;
+#[cfg(all(not(boringssl), not(libressl), not(osslconf = "OPENSSL_NO_CMS")))]
 pub mod cms;
 pub mod conf;
 pub mod derive;
@@ -150,19 +148,30 @@ pub mod dh;
 pub mod dsa;
 pub mod ec;
 pub mod ecdsa;
+pub mod encrypt;
+#[cfg(not(boringssl))]
 pub mod envelope;
 pub mod error;
 pub mod ex_data;
-#[cfg(not(libressl))]
+#[cfg(not(any(libressl, ossl300)))]
 pub mod fips;
 pub mod hash;
+#[cfg(ossl300)]
+pub mod lib_ctx;
+pub mod md;
+pub mod md_ctx;
 pub mod memcmp;
 pub mod nid;
+#[cfg(not(any(boringssl, osslconf = "OPENSSL_NO_OCSP")))]
 pub mod ocsp;
 pub mod pkcs12;
 pub mod pkcs5;
+#[cfg(not(boringssl))]
 pub mod pkcs7;
 pub mod pkey;
+pub mod pkey_ctx;
+#[cfg(ossl300)]
+pub mod provider;
 pub mod rand;
 pub mod rsa;
 pub mod sha;
@@ -175,6 +184,17 @@ pub mod symm;
 pub mod version;
 pub mod x509;
 
+#[cfg(boringssl)]
+type LenType = libc::size_t;
+#[cfg(not(boringssl))]
+type LenType = libc::c_int;
+
+#[cfg(boringssl)]
+type SLenType = libc::ssize_t;
+#[cfg(not(boringssl))]
+type SLenType = libc::c_int;
+
+#[inline]
 fn cvt_p<T>(r: *mut T) -> Result<*mut T, ErrorStack> {
     if r.is_null() {
         Err(ErrorStack::get())
@@ -183,6 +203,7 @@ fn cvt_p<T>(r: *mut T) -> Result<*mut T, ErrorStack> {
     }
 }
 
+#[inline]
 fn cvt(r: c_int) -> Result<c_int, ErrorStack> {
     if r <= 0 {
         Err(ErrorStack::get())
@@ -191,6 +212,7 @@ fn cvt(r: c_int) -> Result<c_int, ErrorStack> {
     }
 }
 
+#[inline]
 fn cvt_n(r: c_int) -> Result<c_int, ErrorStack> {
     if r < 0 {
         Err(ErrorStack::get())

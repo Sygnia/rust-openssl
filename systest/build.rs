@@ -1,12 +1,13 @@
-extern crate ctest;
+#![allow(clippy::uninlined_format_args)]
 
 use std::env;
 
+#[allow(clippy::inconsistent_digit_grouping, clippy::unusual_byte_groupings)]
 #[path = "../openssl-sys/build/cfgs.rs"]
 mod cfgs;
 
 fn main() {
-    let mut cfg = ctest::TestGenerator::new();
+    let mut cfg = ctest2::TestGenerator::new();
     let target = env::var("TARGET").unwrap();
 
     if let Ok(out) = env::var("DEP_OPENSSL_INCLUDE") {
@@ -35,12 +36,14 @@ fn main() {
         .ok()
         .map(|v| u64::from_str_radix(&v, 16).unwrap());
 
+    cfg.cfg("openssl", None);
+
     for c in cfgs::get(openssl_version, libressl_version) {
         cfg.cfg(c, None);
     }
 
     if let Ok(vars) = env::var("DEP_OPENSSL_CONF") {
-        for var in vars.split(",") {
+        for var in vars.split(',') {
             cfg.cfg("osslconf", Some(var));
         }
     }
@@ -53,7 +56,9 @@ fn main() {
         .header("openssl/bio.h")
         .header("openssl/x509v3.h")
         .header("openssl/safestack.h")
+        .header("openssl/cmac.h")
         .header("openssl/hmac.h")
+        .header("openssl/obj_mac.h")
         .header("openssl/ssl.h")
         .header("openssl/err.h")
         .header("openssl/rand.h")
@@ -61,21 +66,30 @@ fn main() {
         .header("openssl/bn.h")
         .header("openssl/aes.h")
         .header("openssl/ocsp.h")
-        .header("openssl/evp.h");
+        .header("openssl/evp.h")
+        .header("openssl/x509_vfy.h");
 
-    if openssl_version.is_some() {
+    if let Some(version) = openssl_version {
         cfg.header("openssl/cms.h");
+        if version >= 0x10100000 {
+            cfg.header("openssl/kdf.h");
+        }
+
+        if version >= 0x30000000 {
+            cfg.header("openssl/provider.h");
+        }
     }
 
+    #[allow(clippy::if_same_then_else)]
     cfg.type_name(|s, is_struct, _is_union| {
         // Add some `*` on some callback parameters to get function pointer to
         // typecheck in C, especially on MSVC.
         if s == "PasswordCallback" {
-            format!("pem_password_cb*")
+            "pem_password_cb*".to_string()
         } else if s == "bio_info_cb" {
-            format!("bio_info_cb*")
+            "bio_info_cb*".to_string()
         } else if s == "_STACK" {
-            format!("struct stack_st")
+            "struct stack_st".to_string()
         // This logic should really be cleaned up
         } else if is_struct
             && s != "point_conversion_form_t"
@@ -85,7 +99,7 @@ fn main() {
         } else if s.starts_with("stack_st_") {
             format!("struct {}", s)
         } else {
-            format!("{}", s)
+            s.to_string()
         }
     });
     cfg.skip_type(|s| {
@@ -96,7 +110,13 @@ fn main() {
             || s == "bio_info_cb"
             || s.starts_with("CRYPTO_EX_")
     });
-    cfg.skip_struct(|s| s == "ProbeResult");
+    cfg.skip_struct(|s| {
+        s == "ProbeResult" ||
+            s == "X509_OBJECT_data" || // inline union
+            s == "DIST_POINT_NAME_st_anon_union" || // inline union
+            s == "PKCS7_data" ||
+            s == "ASN1_TYPE_value"
+    });
     cfg.skip_fn(move |s| {
         s == "CRYPTO_memcmp" ||                 // uses volatile
 
@@ -106,6 +126,7 @@ fn main() {
             s.starts_with("PEM_read_bio_") ||
             (s.starts_with("PEM_write_bio_") && s.ends_with("PrivateKey")) ||
             s == "d2i_PKCS8PrivateKey_bio" ||
+            s == "i2d_PKCS8PrivateKey_bio" ||
             s == "SSL_get_ex_new_index" ||
             s == "SSL_CTX_get_ex_new_index" ||
             s == "CRYPTO_get_ex_new_index"
@@ -113,7 +134,11 @@ fn main() {
     });
     cfg.skip_field_type(|s, field| {
         (s == "EVP_PKEY" && field == "pkey") ||      // union
-            (s == "GENERAL_NAME" && field == "d") // union
+            (s == "GENERAL_NAME" && field == "d") || // union
+            (s == "DIST_POINT_NAME" && field == "name") || // union
+            (s == "X509_OBJECT" && field == "data") || // union
+            (s == "PKCS7" && field == "d") || // union
+            (s == "ASN1_TYPE" && field == "value") // union
     });
     cfg.skip_signededness(|s| {
         s.ends_with("_cb")
@@ -126,9 +151,9 @@ fn main() {
     });
     cfg.field_name(|_s, field| {
         if field == "type_" {
-            format!("type")
+            "type".to_string()
         } else {
-            format!("{}", field)
+            field.to_string()
         }
     });
     cfg.fn_cname(|rust, link_name| link_name.unwrap_or(rust).to_string());
